@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>⚡ Circuit Puzzle — Infinite Mode</title>
+<meta name="description" content="회로를 연결해 LED를 켜고 모터를 돌리는 무한 퍼즐 게임">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { min-height: 100vh; background: #060b12; }
+  body { font-family: 'JetBrains Mono', 'Fira Code', monospace; -webkit-tap-highlight-color: transparent; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(-8px) } to { opacity:1; transform:translateY(0) } }
+  @keyframes pulse { 0%,100% { box-shadow:0 0 20px #00ffaa33 } 50% { box-shadow:0 0 50px #00ffaa66 } }
+  @keyframes winPop { 0% { transform:scale(0.85); opacity:0 } 100% { transform:scale(1); opacity:1 } }
+  @keyframes sparkle { 0%,100% { opacity:0.3 } 50% { opacity:1 } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.9/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useCallback, useEffect, useRef, useMemo } = React;
+
+const CELL = 68;
+const P = { EMPTY:0, H:1, V:2, TR:3, BR:4, BL:5, TL:6, CROSS:7 };
+const pipeConns = {
+  [P.EMPTY]:[], [P.H]:["left","right"], [P.V]:["top","bottom"],
+  [P.TR]:["top","right"], [P.BR]:["bottom","right"],
+  [P.BL]:["bottom","left"], [P.TL]:["top","left"],
+  [P.CROSS]:["top","bottom","left","right"],
+};
+const OPP = { top:"bottom", bottom:"top", left:"right", right:"left" };
+const DIR_D = { top:[0,-1], bottom:[0,1], left:[-1,0], right:[1,0] };
+const rotPipe = p => ({ [P.H]:P.V,[P.V]:P.H,[P.TR]:P.BR,[P.BR]:P.BL,[P.BL]:P.TL,[P.TL]:P.TR,[P.CROSS]:P.CROSS,[P.EMPTY]:P.EMPTY }[p]??p);
+const rotDir = d => ({ right:"bottom", bottom:"left", left:"top", top:"right" }[d]);
+const C = { NONE:0, BAT_P:1, BAT_N:2, LED:3, MOTOR:4, DIODE:5, RESISTOR:6 };
+
+function shuffle(a) { const b=[...a]; for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];} return b; }
+const randWire = () => [P.H,P.V,P.TR,P.BR,P.BL,P.TL][Math.floor(Math.random()*6)];
+const randInt = (a,b) => a + Math.floor(Math.random()*(b-a+1));
+
+function dirsToP(d1, d2) {
+  const k = [d1,d2].sort().join(",");
+  return {"left,right":P.H,"bottom,top":P.V,"right,top":P.TR,"bottom,right":P.BR,"bottom,left":P.BL,"left,top":P.TL}[k] || P.H;
+}
+function endPipe(dir) {
+  return {right:[P.H,P.BR,P.TR],left:[P.H,P.BL,P.TL],top:[P.V,P.TR,P.TL],bottom:[P.V,P.BR,P.BL]}[dir][randInt(0,2)];
+}
+function getDir(fx,fy,tx,ty) {
+  if(tx>fx)return"right"; if(tx<fx)return"left"; if(ty>fy)return"bottom"; return"top";
+}
+
+function generatePath(cols, rows, sx, sy, ex, ey, minLen) {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const visited = new Set();
+    const path = [];
+    function dfs(x, y) {
+      path.push([x, y]); visited.add(`${x},${y}`);
+      if (x === ex && y === ey && path.length >= minLen) return true;
+      if (x === ex && y === ey && path.length < minLen) { path.pop(); visited.delete(`${x},${y}`); return false; }
+      const nb = shuffle([[x+1,y],[x-1,y],[x,y+1],[x,y-1]].filter(([nx,ny])=>nx>=0&&nx<cols&&ny>=0&&ny<rows&&!visited.has(`${nx},${ny}`)));
+      for (const [nx,ny] of nb) { if(dfs(nx,ny)) return true; }
+      path.pop(); visited.delete(`${x},${y}`); return false;
+    }
+    if (dfs(sx, sy)) return path;
+  }
+  const path = [];
+  for (let x = sx; x <= ex; x++) path.push([x, sy]);
+  for (let y = sy+1; y <= ey; y++) path.push([ex, y]);
+  if (path.length === 0 || (path[path.length-1][0]!==ex||path[path.length-1][1]!==ey)) path.push([ex,ey]);
+  return path;
+}
+
+function generateStage(level) {
+  let cols, rows;
+  if (level <= 3) { cols = 4; rows = 3; }
+  else if (level <= 7) { cols = 5; rows = 4; }
+  else if (level <= 12) { cols = 6; rows = 4; }
+  else if (level <= 18) { cols = 6; rows = 5; }
+  else { cols = 7; rows = 5; }
+
+  let numLeds = 1, numDiodes = 0, hasMotor = false, numResistors = 0;
+  if (level >= 3) numLeds = 2;
+  if (level >= 6) numDiodes = 1;
+  if (level >= 9) numDiodes = 2;
+  if (level >= 12) { hasMotor = true; numResistors = 1; }
+  if (level >= 16) { numLeds = 2; numDiodes = 2; hasMotor = true; numResistors = 1; }
+  if (level >= 22) { numLeds = 3; numDiodes = 2; }
+
+  const corners = shuffle([[0,0],[cols-1,0],[0,rows-1],[cols-1,rows-1]]);
+  const [sx,sy] = corners[0];
+  const [ex,ey] = corners[1];
+
+  const minLen = Math.max(cols + rows - 1, Math.floor(cols * rows * 0.35));
+  const path = generatePath(cols, rows, sx, sy, ex, ey, minLen);
+
+  const cells = path.map(([x,y], i) => {
+    let pipe;
+    if (i === 0) pipe = endPipe(getDir(x, y, path[1][0], path[1][1]));
+    else if (i === path.length - 1) pipe = endPipe(getDir(x, y, path[i-1][0], path[i-1][1]));
+    else { const entry = getDir(x, y, path[i-1][0], path[i-1][1]); const exit = getDir(x, y, path[i+1][0], path[i+1][1]); pipe = dirsToP(entry, exit); }
+    return { x, y, pipe, comp: C.NONE, diodeDir: null };
+  });
+
+  cells[0].comp = C.BAT_P;
+  cells[cells.length - 1].comp = C.BAT_N;
+
+  const mid = [];
+  for (let i = 1; i < cells.length - 1; i++) mid.push(i);
+  const shuf = shuffle(mid);
+  let used = 0;
+
+  for (let i = 0; i < numLeds && used < shuf.length; i++, used++) cells[shuf[used]].comp = C.LED;
+  for (let i = 0; i < numDiodes; i++) {
+    for (let j = used; j < shuf.length; j++) {
+      const ci = shuf[j];
+      if (cells[ci].comp === C.NONE && (cells[ci].pipe === P.H || cells[ci].pipe === P.V)) {
+        cells[ci].comp = C.DIODE;
+        cells[ci].diodeDir = getDir(cells[ci].x, cells[ci].y, cells[ci+1].x, cells[ci+1].y);
+        [shuf[used], shuf[j]] = [shuf[j], shuf[used]]; used++; break;
+      }
+    }
+  }
+  if (hasMotor) { for (let j = used; j < shuf.length; j++) { if (cells[shuf[j]].comp === C.NONE) { cells[shuf[j]].comp = C.MOTOR; [shuf[used], shuf[j]] = [shuf[j], shuf[used]]; used++; break; } } }
+  for (let i = 0; i < numResistors; i++) { for (let j = used; j < shuf.length; j++) { if (cells[shuf[j]].comp === C.NONE) { cells[shuf[j]].comp = C.RESISTOR; [shuf[used], shuf[j]] = [shuf[j], shuf[used]]; used++; break; } } }
+
+  const par = Math.max(3, Math.ceil(path.length * 1.2));
+  const tier = level<=3?"BEGINNER":level<=7?"INTERMEDIATE":level<=12?"ADVANCED":level<=18?"EXPERT":"MASTER";
+  return { cols, rows, cells, par, level, tier,
+    hint: `LED×${numLeds}${numDiodes?" Diode×"+numDiodes:""}${hasMotor?" Motor×1":""}${numResistors?" Resistor×"+numResistors:""}`,
+  };
+}
+
+function buildGrid(stage) {
+  const g = {}, defined = new Set();
+  for (const c of stage.cells) { const k=`${c.x},${c.y}`; defined.add(k); g[k]={pipe:c.pipe,comp:c.comp||C.NONE,diodeDir:c.diodeDir||null}; }
+  for (let y=0;y<stage.rows;y++) for(let x=0;x<stage.cols;x++) { const k=`${x},${y}`; if(!defined.has(k)) g[k]={pipe:randWire(),comp:C.NONE,diodeDir:null}; }
+  return g;
+}
+function scrambleGrid(grid) {
+  const g={};
+  for(const k of Object.keys(grid)){const c=grid[k];if(c.pipe===P.EMPTY||c.pipe===P.CROSS){g[k]={...c};continue;}
+    let p=c.pipe,d=c.diodeDir;const r=Math.floor(Math.random()*3)+1;for(let i=0;i<r;i++){p=rotPipe(p);if(d)d=rotDir(d);}g[k]={...c,pipe:p,diodeDir:d};}
+  return g;
+}
+
+function solveCircuit(grid, stage) {
+  const batP=stage.cells.find(c=>c.comp===C.BAT_P), batN=stage.cells.find(c=>c.comp===C.BAT_N);
+  if(!batP||!batN) return {powered:new Set(),litLeds:new Set(),motorOk:false,hasMotor:false,resistorCount:0};
+  const startK=`${batP.x},${batP.y}`,endK=`${batN.x},${batN.y}`;
+  const canFlow=(fromK,dir)=>{const fc=grid[fromK];if(!fc||!pipeConns[fc.pipe]?.includes(dir))return false;
+    if(fc.comp===C.DIODE&&fc.diodeDir&&dir!==fc.diodeDir)return false;
+    const[dx,dy]=DIR_D[dir];const[fx,fy]=fromK.split(",").map(Number);const toK=`${fx+dx},${fy+dy}`;const tc=grid[toK];
+    if(!tc)return false;const es=OPP[dir];if(!pipeConns[tc.pipe]?.includes(es))return false;
+    if(tc.comp===C.DIODE&&tc.diodeDir&&es!==OPP[tc.diodeDir])return false;return true;};
+
+  const fwd=new Set(),fQ=[startK];fwd.add(startK);
+  while(fQ.length>0){const key=fQ.shift();const cell=grid[key];if(!cell)continue;
+    for(const dir of(pipeConns[cell.pipe]||[])){if(!canFlow(key,dir))continue;const[dx,dy]=DIR_D[dir];const[cx,cy]=key.split(",").map(Number);const nk=`${cx+dx},${cy+dy}`;if(fwd.has(nk))continue;fwd.add(nk);fQ.push(nk);}}
+  if(!fwd.has(endK))return{powered:new Set(),litLeds:new Set(),motorOk:false,hasMotor:false,resistorCount:0};
+
+  const bwd=new Set(),bQ=[endK];bwd.add(endK);
+  while(bQ.length>0){const key=bQ.shift();const[cx,cy]=key.split(",").map(Number);
+    for(const dir of["top","bottom","left","right"]){const[dx,dy]=DIR_D[dir];const nk=`${cx+dx},${cy+dy}`;if(bwd.has(nk)||!grid[nk])continue;if(canFlow(nk,OPP[dir])){bwd.add(nk);bQ.push(nk);}}}
+
+  const pathSet=new Set();for(const k of fwd)if(bwd.has(k))pathSet.add(k);
+  const litLeds=new Set();let resistorCount=0,hasMotor=false;
+  for(const k of pathSet){const c=grid[k];if(c?.comp===C.LED)litLeds.add(k);if(c?.comp===C.MOTOR)hasMotor=true;if(c?.comp===C.RESISTOR)resistorCount++;}
+  return{powered:pathSet,litLeds,motorOk:hasMotor?resistorCount<2:true,hasMotor,resistorCount};
+}
+
+/* --- SVG Components --- */
+function WireSVG({type,powered}){const color=powered?"#00ffaa":"#2a3a4a";const c=34;const segs=[];const conn=pipeConns[type]||[];
+  if(conn.includes("top"))segs.push(<line key="t" x1={c} y1={0} x2={c} y2={c}/>);if(conn.includes("bottom"))segs.push(<line key="b" x1={c} y1={c} x2={c} y2={68}/>);
+  if(conn.includes("left"))segs.push(<line key="l" x1={0} y1={c} x2={c} y2={c}/>);if(conn.includes("right"))segs.push(<line key="r" x1={c} y1={c} x2={68} y2={c}/>);
+  return(<g stroke={color} strokeWidth={4.5} strokeLinecap="round" fill="none" style={{filter:powered?"drop-shadow(0 0 6px #00ffaa88)":"none"}}>{segs}{conn.length>0&&<circle cx={c} cy={c} r={2.5} fill={color}/>}</g>);}
+
+function BatterySVG({isPos,powered}){const c=34;const col=powered?(isPos?"#ff4466":"#4488ff"):"#3a4a5a";
+  return(<g><rect x={18} y={18} width={32} height={32} rx={6} fill={powered?(isPos?"#ff446618":"#4488ff18"):"#0a1018"} stroke={col} strokeWidth={2.5}/>
+    {isPos?(<g fill={col}><rect x={30} y={24} width={8} height={20} rx={1}/><rect x={24} y={30} width={20} height={8} rx={1}/></g>):(<rect x={24} y={31} width={20} height={6} rx={1} fill={col}/>)}
+    {powered&&<circle cx={c} cy={c} r={22} fill="none" stroke={col} strokeWidth={1.5} opacity={0.3}><animate attributeName="r" values="18;24;18" dur="2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.4;0.1;0.4" dur="2s" repeatCount="indefinite"/></circle>}</g>);}
+
+function LedSVG({powered}){const c=34;return(<g><polygon points={`${c-10},${c-12} ${c+12},${c} ${c-10},${c+12}`} fill={powered?"#ff3366":"#1a1a2a"} stroke={powered?"#ff5588":"#3a3a5a"} strokeWidth={2}/>
+  <line x1={c+12} y1={c-10} x2={c+12} y2={c+10} stroke={powered?"#ff5588":"#3a3a5a"} strokeWidth={2}/>
+  {powered&&<><circle cx={c} cy={c} r={20} fill="none" stroke="#ff336644" strokeWidth={3}><animate attributeName="r" values="14;22;14" dur="1.2s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0.15;0.7" dur="1.2s" repeatCount="indefinite"/></circle>
+  <circle cx={c} cy={c} r={6} fill="#ff336666"><animate attributeName="r" values="4;8;4" dur="1.2s" repeatCount="indefinite"/></circle></>}</g>);}
+
+function MotorSVG({powered,motorOk}){const c=34;const active=powered&&motorOk;const col=active?"#00ccff":(powered&&!motorOk?"#ff8800":"#3a4a5a");
+  return(<g><circle cx={c} cy={c} r={16} fill={active?"#00ccff12":"#0a1018"} stroke={col} strokeWidth={2.5}/>
+    <text x={c} y={c+5} textAnchor="middle" fill={col} fontSize={14} fontWeight="bold" fontFamily="monospace">M</text>
+    {active&&<g stroke={col} strokeWidth={1.5} fill="none" opacity={0.6}>{[0,90,180,270].map(a=><line key={a} x1={c} y1={c-16} x2={c} y2={c-22} transform={`rotate(${a} ${c} ${c})`}><animateTransform attributeName="transform" type="rotate" from={`${a} ${c} ${c}`} to={`${a+360} ${c} ${c}`} dur="0.8s" repeatCount="indefinite"/></line>)}</g>}
+    {powered&&!motorOk&&<text x={c} y={c+30} textAnchor="middle" fill="#ff8800" fontSize={8} fontFamily="monospace">OVERLOAD</text>}</g>);}
+
+function DiodeSVG({powered,diodeDir}){const c=34;const col=powered?"#ffcc00":"#5a5a3a";const rot={right:0,bottom:90,left:180,top:270}[diodeDir]||0;
+  return(<g transform={`rotate(${rot} ${c} ${c})`}><polygon points={`${c-8},${c-9} ${c+8},${c} ${c-8},${c+9}`} fill={powered?"#ffcc0033":"#1a1a18"} stroke={col} strokeWidth={2}/>
+    <line x1={c+8} y1={c-8} x2={c+8} y2={c+8} stroke={col} strokeWidth={2}/>
+    {powered&&<circle cx={c} cy={c} r={16} fill="none" stroke="#ffcc0033" strokeWidth={2}><animate attributeName="opacity" values="0.5;0.1;0.5" dur="1.5s" repeatCount="indefinite"/></circle>}</g>);}
+
+function ResistorSVG({powered}){const col=powered?"#ff9944":"#4a3a2a";
+  return(<g><rect x={22} y={26} width={24} height={16} rx={3} fill={powered?"#ff994418":"#0a0a08"} stroke={col} strokeWidth={2}/>
+    {[26,30,34,38,42].map(x=><line key={x} x1={x} y1={30} x2={x} y2={38} stroke={col} strokeWidth={1.5}/>)}</g>);}
+
+function CellView({cell,powered,motorOk,onClick}){const isPow=powered&&cell.pipe!==P.EMPTY;
+  return(<div onClick={onClick} style={{width:CELL,height:CELL,background:isPow?"#081a12":"#0d1520",border:`1px solid ${isPow?"#00ffaa28":"#151f2a"}`,cursor:"pointer",transition:"all 0.25s",borderRadius:3}}>
+    <svg width={CELL} height={CELL} viewBox="0 0 68 68" style={{display:"block"}}><WireSVG type={cell.pipe} powered={isPow}/>
+      {cell.comp===C.BAT_P&&<BatterySVG isPos={true} powered={isPow}/>}{cell.comp===C.BAT_N&&<BatterySVG isPos={false} powered={isPow}/>}
+      {cell.comp===C.LED&&<LedSVG powered={isPow}/>}{cell.comp===C.MOTOR&&<MotorSVG powered={isPow} motorOk={motorOk}/>}
+      {cell.comp===C.DIODE&&<DiodeSVG powered={isPow} diodeDir={cell.diodeDir}/>}{cell.comp===C.RESISTOR&&<ResistorSVG powered={isPow}/>}</svg></div>);}
+
+function Legend(){const items=[{label:"Battery +",color:"#ff4466",sym:"+"},{label:"Battery −",color:"#4488ff",sym:"−"},{label:"LED",color:"#ff3366",sym:"▶|"},
+  {label:"Motor",color:"#00ccff",sym:"M"},{label:"Diode",color:"#ffcc00",sym:"▶"},{label:"Resistor",color:"#ff9944",sym:"⦚"}];
+  return(<div style={{display:"flex",flexWrap:"wrap",gap:"6px 14px",justifyContent:"center",maxWidth:460}}>
+    {items.map(it=><div key={it.label} style={{display:"flex",alignItems:"center",gap:5,fontSize:11}}>
+      <span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:20,height:20,borderRadius:4,background:`${it.color}18`,border:`1px solid ${it.color}44`,color:it.color,fontSize:11,fontWeight:700,fontFamily:"monospace"}}>{it.sym}</span>
+      <span style={{color:"#5a6a7a"}}>{it.label}</span></div>)}</div>);}
+
+/* --- Main App --- */
+function App() {
+  const [level, setLevel] = useState(1);
+  const [stage, setStage] = useState(() => generateStage(1));
+  const [grid, setGrid] = useState(() => scrambleGrid(buildGrid(stage)));
+  const [moves, setMoves] = useState(0);
+  const [cleared, setCleared] = useState(false);
+  const [showWin, setShowWin] = useState(false);
+  const [seconds, setSeconds] = useState(0);
+  const [bestMoves, setBestMoves] = useState({});
+  const timerRef = useRef(null);
+
+  const result = useMemo(() => solveCircuit(grid, stage), [grid, stage]);
+  const { powered, litLeds, motorOk, hasMotor, resistorCount } = result;
+  const totalLeds = stage.cells.filter(c => c.comp === C.LED).length;
+  const totalMotors = stage.cells.filter(c => c.comp === C.MOTOR).length;
+  const allLedsLit = litLeds.size === totalLeds && totalLeds > 0;
+  const allMotorsOk = totalMotors === 0 || (hasMotor && motorOk);
+  const isWin = powered.size > 0 && allLedsLit && allMotorsOk;
+
+  useEffect(() => {
+    if (!cleared) { timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000); return () => clearInterval(timerRef.current); }
+  }, [level, cleared]);
+
+  useEffect(() => {
+    if (isWin && !cleared) {
+      setCleared(true); clearInterval(timerRef.current);
+      setBestMoves(prev => { const b = { ...prev }; if (!b[level] || moves < b[level]) b[level] = moves; return b; });
+      setTimeout(() => setShowWin(true), 500);
+    }
+  }, [isWin, cleared]);
+
+  const handleClick = useCallback((key) => {
+    if (cleared) return;
+    const cell = grid[key];
+    if (!cell || cell.pipe === P.EMPTY || cell.pipe === P.CROSS) return;
+    setGrid(prev => { const c = prev[key]; return { ...prev, [key]: { ...c, pipe: rotPipe(c.pipe), diodeDir: c.diodeDir ? rotDir(c.diodeDir) : null } }; });
+    setMoves(m => m + 1);
+  }, [cleared, grid]);
+
+  const loadLevel = useCallback((lv) => {
+    const s = generateStage(lv);
+    setLevel(lv); setStage(s); setGrid(scrambleGrid(buildGrid(s)));
+    setMoves(0); setCleared(false); setShowWin(false); setSeconds(0);
+  }, []);
+
+  const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const stars = (m, par) => m <= par ? 3 : m <= par * 2 ? 2 : 1;
+  const tierColor = { BEGINNER:"#00ffaa", INTERMEDIATE:"#00ccff", ADVANCED:"#ffcc00", EXPERT:"#ff8844", MASTER:"#ff3366" };
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#060b12", fontFamily:"'JetBrains Mono','Fira Code',monospace", color:"#c0d0e0", display:"flex", flexDirection:"column", alignItems:"center", padding:"16px 10px" }}>
+
+      <h1 style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:900, fontSize:"clamp(18px,4.5vw,28px)", letterSpacing:5, color:"#00ffaa", textTransform:"uppercase", textShadow:"0 0 30px #00ffaa55, 0 0 60px #00ffaa22", margin:"0 0 2px" }}>⚡ CIRCUIT PUZZLE</h1>
+      <p style={{ fontSize:10, color:"#3a5a4a", margin:"0 0 14px", letterSpacing:3 }}>CONNECT + TO − • INFINITE MODE</p>
+
+      {/* Level navigation */}
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:12 }}>
+        <button onClick={() => level > 1 && loadLevel(level - 1)} disabled={level<=1}
+          style={{ padding:"6px 14px", background:"#0a1018", border:"1px solid #1a2533", color:level>1?"#5a6a7a":"#1a2533", fontFamily:"inherit", fontSize:14, cursor:level>1?"pointer":"default", borderRadius:4 }}>◀</button>
+        <div style={{ textAlign:"center", minWidth:160 }}>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:22, color:tierColor[stage.tier]||"#00ffaa" }}>LEVEL {level}</div>
+          <div style={{ fontSize:10, color:tierColor[stage.tier]||"#3a5a4a", letterSpacing:2, opacity:0.7 }}>{stage.tier}</div>
+        </div>
+        <button onClick={() => loadLevel(level + 1)}
+          style={{ padding:"6px 14px", background:"#0a1018", border:"1px solid #1a2533", color:"#5a6a7a", fontFamily:"inherit", fontSize:14, cursor:"pointer", borderRadius:4 }}>▶</button>
+      </div>
+
+      {/* Info */}
+      <div style={{ background:"#0a1118", border:"1px solid #151f2a", borderRadius:8, padding:"8px 18px", marginBottom:10, maxWidth:440, textAlign:"center", animation:"fadeIn 0.4s" }}>
+        <div style={{ fontSize:11, color:"#5a6a7a", letterSpacing:1 }}>{stage.hint}</div>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display:"flex", gap:18, marginBottom:10, fontSize:12, flexWrap:"wrap", justifyContent:"center" }}>
+        <span><span style={{color:"#3a4a5a"}}>MOVES </span><span style={{color:"#00ccff",fontWeight:700}}>{moves}</span></span>
+        <span><span style={{color:"#3a4a5a"}}>TIME </span><span style={{color:"#00ccff",fontWeight:700}}>{fmt(seconds)}</span></span>
+        <span><span style={{color:"#3a4a5a"}}>PAR </span><span style={{color:"#ffcc00",fontWeight:700}}>{stage.par}</span></span>
+        <span><span style={{color:"#3a4a5a"}}>LED </span><span style={{color:allLedsLit?"#ff3366":"#ff336666",fontWeight:700}}>{litLeds.size}/{totalLeds}</span></span>
+        {totalMotors > 0 && <span><span style={{color:"#3a4a5a"}}>MOTOR </span><span style={{color:motorOk&&powered.size>0?"#00ccff":"#00ccff66",fontWeight:700}}>{motorOk&&powered.size>0?"ON":"OFF"}</span></span>}
+        {bestMoves[level]!=null && <span><span style={{color:"#3a4a5a"}}>BEST </span><span style={{color:"#ff9900",fontWeight:700}}>{bestMoves[level]}</span></span>}
+      </div>
+
+      {/* Grid */}
+      <div style={{
+        display:"grid", gridTemplateColumns:`repeat(${stage.cols}, ${CELL}px)`, gridTemplateRows:`repeat(${stage.rows}, ${CELL}px)`,
+        gap:2, background:"#040810", padding:8, borderRadius:12,
+        border:`1px solid ${isWin?"#00ffaa44":"#121a24"}`,
+        boxShadow:isWin?"0 0 40px #00ffaa33":"0 4px 30px #00000088",
+        animation:isWin?"pulse 1.5s infinite":"none", transition:"all 0.5s",
+      }}>
+        {Array.from({length:stage.rows},(_,y)=>
+          Array.from({length:stage.cols},(_,x)=>{
+            const k=`${x},${y}`;const cell=grid[k];
+            return <CellView key={k} cell={cell} powered={powered.has(k)} motorOk={motorOk} onClick={()=>handleClick(k)}/>;
+          })
+        )}
+      </div>
+
+      {hasMotor&&powered.size>0&&!motorOk&&(
+        <div style={{marginTop:10,padding:"6px 16px",borderRadius:6,background:"#ff880018",border:"1px solid #ff880044",color:"#ff9944",fontSize:11,animation:"fadeIn 0.3s"}}>
+          ⚠ 저항 과다! 경로의 저항을 줄이세요 (현재: {resistorCount}개, 최대: 1개)
+        </div>
+      )}
+
+      {/* Controls */}
+      <div style={{ display:"flex", gap:10, marginTop:14 }}>
+        <button onClick={() => loadLevel(level)} style={{padding:"7px 22px",background:"#0f1520",border:"1px solid #1a2a3a",color:"#5a6a7a",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:6,letterSpacing:1}}>↻ RESET</button>
+        <button onClick={() => {const s=generateStage(level);setStage(s);setGrid(scrambleGrid(buildGrid(s)));setMoves(0);setSeconds(0);setCleared(false);}}
+          style={{padding:"7px 22px",background:"#0f1520",border:"1px solid #1a2a3a",color:"#5a6a7a",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:6,letterSpacing:1}}>🔀 NEW</button>
+      </div>
+
+      <div style={{marginTop:18}}><Legend/></div>
+
+      <div style={{marginTop:14,maxWidth:440,textAlign:"center",color:"#2a3a4a",fontSize:10,lineHeight:2,letterSpacing:0.5}}>
+        <span style={{color:"#00ffaa66",fontSize:11}}>HOW TO PLAY</span><br/>
+        모든 타일 클릭 → 90° 회전 · 가짜 전선에 속지 마세요!<br/>
+        배터리 <span style={{color:"#ff4466"}}>+</span>에서 <span style={{color:"#4488ff"}}>−</span>까지 회로를 완성하면 클리어!<br/>
+        <span style={{color:"#ffcc00"}}>다이오드(▶)</span> 화살표 방향으로만 전류 통과 ·
+        <span style={{color:"#ff9944"}}> 저항(⦚)</span> 2개 이상 → <span style={{color:"#00ccff"}}>모터</span> 과부하
+      </div>
+
+      {/* Win modal */}
+      {showWin && (
+        <div style={{position:"fixed",inset:0,background:"#000000cc",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100}}>
+          <div style={{background:"#0b1520",border:"2px solid #00ffaa",borderRadius:16,padding:"36px 44px",textAlign:"center",animation:"winPop 0.4s ease",boxShadow:"0 0 80px #00ffaa33",maxWidth:"90vw"}}>
+            <div style={{fontSize:44,marginBottom:6}}>⚡</div>
+            <h2 style={{fontFamily:"'Orbitron',sans-serif",fontWeight:900,fontSize:24,color:"#00ffaa",margin:"0 0 6px",textShadow:"0 0 20px #00ffaa55"}}>CIRCUIT COMPLETE!</h2>
+            <div style={{fontSize:22,margin:"8px 0",color:"#ffcc00",animation:"sparkle 0.6s infinite",letterSpacing:2}}>
+              {"★".repeat(stars(moves,stage.par))}{"☆".repeat(3-stars(moves,stage.par))}
+            </div>
+            <p style={{color:"#5a7a6a",fontSize:13,margin:"0 0 2px"}}>Level {level} cleared!</p>
+            <p style={{color:"#3a5a4a",fontSize:11,margin:"0 0 20px"}}>{moves} moves · {fmt(seconds)} · par {stage.par}</p>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <button onClick={()=>{setShowWin(false);loadLevel(level);}}
+                style={{padding:"9px 24px",background:"#1a1a2e",border:"1px solid #2a3a4a",color:"#7a8a9a",fontFamily:"inherit",fontSize:12,cursor:"pointer",borderRadius:8,letterSpacing:1}}>RETRY</button>
+              <button onClick={()=>{setShowWin(false);loadLevel(level+1);}}
+                style={{padding:"9px 24px",background:"#00ffaa18",border:"1px solid #00ffaa",color:"#00ffaa",fontFamily:"inherit",fontSize:12,cursor:"pointer",borderRadius:8,fontWeight:700,letterSpacing:1}}>NEXT →</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
